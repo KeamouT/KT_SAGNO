@@ -62,3 +62,4 @@ description1<- cta %>%
 ggplot(cta)+
   aes(x = Centre_traitement) +
   geom_bar()
+
