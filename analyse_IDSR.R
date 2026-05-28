@@ -1,176 +1,8 @@
-###SC - J'ai rajouté la ligne ci-dessous. 
 rm(list = ls(all=TRUE))
 
-## Load libraries ---- 
-library(sf)	
-library(MAP)	
-library(terra)	
-library(rio)           	# importer/exporter
-library(here)          	# chemin vers les fichiers
-library(skimr)       	  # obtenir un aperçu des données
-library(rstatix)     	  # sommaire des statistiques et tests statistique
-library(janitor)      	# ajouter des totaux et des pourcentages à des tableaux
-library(scales)		      # convertir facilement les proportions en pourcentages
-library(gtsummary)    	# sommaire des statistiques et tests
-library(flextable)      # creer des tables HTML
-library(officer)        # fonctions d'aide pour les tables
-library(tidyverse)      # data management_resume et visualisation
-library(readxl)        	# lire les fichiers excel
-library(haven)          # lire les fichiers format stata
-library(naniar)       	# bilan des données manquantes
-library(lubridate)  	  # paquet général pour la manipulation et la conversion des dates 
-library(parsedate)    	# a une fonction pour "deviner" les dates désordonnées
-library(aweek)        	# une autre option pour convertir les dates en semaines et les semaines en dates
-library(zoo)          	# fonctions supplémentaires de date et d'heure
-library(mice)           # imputation
-library(kableExtra)	
-library(tidyverse)	
-library(data.table)	
-library(rstatix)      	# sommaire des statistiques et tests statistiques
-library(janitor)      	# ajouter des totaux et des pourcentages à des tableaux
-library(scales)       	# convertir facilement les proportions en pourcentages  
-library(flextable)    	# convertir les tableaux en belles images
-library(labelled)	
-library(questionr)	
-library(dplyr)	
-library(tidyr)	
-library(stringr)	
-library(gt)	
-library(tools)
-library(lwgeom)
-library(tmap)
-
-
-### SC - I suggest you work with projects. This way you don't have to always indicate WD. Otherwise use here:here(), it makes it more shareable than setwd()
 # ============================================================
-# Data preparation
+# PACKAGES
 # ============================================================
-
-# Import des bases de données----
-base_idsr<- read_excel("analyse_weekly-IDSR_.xlsx",
-                       sheet = 1)
-
-idsr<- base_idsr %>% filter(!is.na(base_idsr$Semaine))
-
-malariaepidemic <- as.data.table(read_excel("Weekly__Malariaepidemic.xls", 
-                                     sheet = "Seuil National", skip = 3, n_max = 7))
-
-ds_bui<- st_read("DISTRICTS/DS BDI 1.4.2026 Vf.shp")
-
-tmap_mode("plot")
-tm_shape(ds_bui) +
-  tm_polygons()
-
-
-# Analyse comparée entre 2025 et 2026 incluant le seui d'alerte----
-names(malariaepidemic)<- c("sit_an", "annees", "S1", "S2", "S3", "S4", "S5", "S6", "S7", 
-                           "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15", "S16", 
-                           "S17", "S18", "S19", "S20", "S21", "S22", "S23", "S24", "S25", 
-                           "S26", "S27", "S28", "S29", "S30", "S31", "S32", "S33", "S34", 
-                           "S35", "S36", "S37", "S38", "S39", "S40", "S41", "S42", "S43", 
-                           "S44", "S45", "S46", "S47", "S48", "S49", "S50", "S51", "S52", 
-                           "S53", "min", "max")
-
-malariaepidemic$annees[7]<- "seuil_alerte"
-malariaepidemic$sit_an[1]<- "annnee_ant6"
-malariaepidemic$sit_an[2]<- "annnee_ant5"
-malariaepidemic$sit_an[3]<- "annnee_ant4"
-malariaepidemic$sit_an[4]<- "annnee_ant3"
-malariaepidemic$sit_an[5]<- "annnee_ant2"
-
-malariaepidemic <- malariaepidemic |> 
-  select(annees:S17)
-
-malariaepidemic <- malariaepidemic |> filter(annees =="2025" | annees =="2026" | annees =="seuil_alerte") 
-
-malaria_epidemic <- malariaepidemic
-
-# Nettoyage du libellé "seui alerte" 
-malariaepidemic <- malariaepidemic %>%
-  mutate(
-    annees = str_squish(as.character(annees)),
-    annees = ifelse(str_detect(tolower(annees), "seui"), "Seuil alerte", annees)
-  )
-
-# Colonnes semaines (S1, S2, ...): détection automatique
-week_cols <- names(malariaepidemic)[str_detect(names(malariaepidemic), "^S\\d+$")]
-
-# Passage en format long : Année | semaine | valeur
-long <- malariaepidemic %>%
-  pivot_longer(cols = all_of(week_cols),
-               names_to = "semaine",
-               values_to = "valeur") %>%
-  mutate(
-    week_num = as.integer(str_remove(semaine, "^S")),
-    semaine  = factor(semaine, levels = paste0("S", sort(unique(week_num))))
-  ) %>%
-  arrange(week_num)
-
-# Séparer séries
-d2025 <- long %>% filter(annees == "2025")
-d2026 <- long %>% filter(annees == "2026")
-dthr  <- long %>% filter(annees == "Seuil alerte")
-
-
-# Graphique superposé
-p <- ggplot() +
-  # --- 2025 : barres en contour (vide) ---
-  geom_col(
-    data = d2025,
-    aes(x = semaine, y = valeur, color = "2025"),
-    fill = NA,
-    linewidth = 0.9,
-    width = 0.78
-  ) +
-  # --- 2026 : barres remplies (par-dessus) ---
-  geom_col(
-    data = d2026,
-    aes(x = semaine, y = valeur, fill = "2026"),
-    color = "midnightblue",
-    alpha = 0.65,
-    width = 0.62
-  ) +
-  # --- Seuil d’alerte : ligne + points ---
-  geom_line(
-    data = dthr,
-    aes(x = semaine, y = valeur, color = "Seuil alerte", group = 1),
-    linewidth = 1.2
-  ) +
-  geom_point(
-    data = dthr,
-    aes(x = semaine, y = valeur, color = "Seuil alerte"),
-    size = 2
-  ) +
-  # --- Axes / format ---
-  scale_y_continuous(labels = label_comma(big.mark = " ", decimal.mark = ",")) +
-  scale_fill_manual(values = c("2026" = "#2C7FB8")) +
-  scale_color_manual(values = c("2025" = "grey30", "Seuil alerte" = "#08306B")) +
-  guides(
-    fill  = guide_legend(title = NULL, order = 1),
-    color = guide_legend(title = NULL, order = 2)
-  ) +
-  labs(
-    title = "Cas de paludisme : comparaison 2025 vs 2026 et seuil d’alerte",
-    x = "Semaine épidémiologique",
-    y = "Nombre de cas"
-  ) +
-  theme_classic(base_size = 13) +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(face = "bold"),
-    axis.text.x = element_text(size = 11)
-  )
-
-# Affichage
-p
-
-
-
-
-
-
-
-
 
 library(readxl)
 library(dplyr)
@@ -179,11 +11,71 @@ library(stringr)
 library(ggplot2)
 library(gt)             # création de jolis tableaux
 library(janitor)      	# ajouter des totaux et des pourcentages à des tableaux
-library(scales)       	# convertir facilement les proportions en pourcentages 
+library(scales)       	# convertir facilement les proportions en pourcentages
 
-# 1) Import
+# ============================================================
+# Import des bases de données----
+# ============================================================
+duplik<- read_excel("duplil_weekly_data.xlsx",
+                       sheet = 1)
+base_idsr<- read_excel("analyse_weekly-IDSR_.xlsx",
+                       sheet = 1)
+
+idsr<- base_idsr %>% filter(!is.na(base_idsr$Semaine))
+
 df <- read_excel("malaria_epic.xlsx", sheet = "Feuil2")
 
+# ============================================================
+# DEDUPLICATION
+# ============================================================
+
+duplik <- duplil_weekly_data
+
+
+duplik %>% 
+  tabyl(districts, semaine)
+
+
+#    Pour rapidement examiner les lignes qui ont été dupliquées, 
+#    utiliser get_dupes() du package janitor. 
+#    Par défaut, toutes les colonnes sont prises en compte lors 
+#    de l’évaluation des duplications - les lignes retournées par la 
+#    fonction sont des doublons à 100% en considérant les valeurs 
+#    de toutes les colonnes.
+
+# 100% duplicates across all columns
+duplik %>% 
+  janitor::get_dupes()
+
+# Duplications lorsque la colonne districts est exclue. 
+duplik %>% 
+  janitor::get_dupes(-districts)         # si multiples colonnes, les inclure dans c()
+
+
+# duplications basées sur les colonnes name et purpose uniquement
+duplik %>% 
+  janitor::get_dupes(districts, semaine)
+
+# DEDUPLIQUER
+# ajouté à une chaîne de pipes (par exemple, nettoyage de données)
+duplik %>% 
+  distinct(across(-districts), # réduit le tableau de données à seulement des lignes uniques (retient la première ligne de toute duplication)
+           .keep_all = TRUE) 
+
+# si en dehors des pipes, inclure les données comme premier argument  
+# distinct(obs)
+
+# Déduplication basée sur des colonnes spécifiques
+
+# ajouté à une chaîne de pipes (par exemple, nettoyage de données)
+duplik %>% 
+  distinct(districts, semaine, .keep_all = TRUE) %>%  # garder les lignes uniques par 'districts' et par 'semaine', retient toutes les colonnes
+  arrange(districts)                                  # arranger pour faciliter la visualisation
+
+# ============================================================
+# RESTRUCTURER - JOINTURE DES DONNEES
+# ============================================================
+      # MODEL/METHODES 1
 # 2) Harmoniser le libellé "seui alerte" -> "Seuil d’alerte"
 df <- df %>%
   mutate(
@@ -298,12 +190,7 @@ guides(
 
 p
 
-# Export (optionnel)
-ggsave("graphique_superpose_paludisme_legend_oms.png", p, width = 10, height = 5.5, dpi = 300)
-
-
-
-
+     # JOINTURE PAR AJOUT DE LIGNES
 # 2) Harmoniser le libellé "seui alerte" (optionnel)
 df <- malaria_epidemic %>%
   mutate(annees = str_squish(as.character(annees)))
