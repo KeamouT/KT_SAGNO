@@ -177,7 +177,9 @@ library(dplyr)
 library(tidyr)
 library(stringr)
 library(ggplot2)
-library(scales)
+library(gt)             # création de jolis tableaux
+library(janitor)      	# ajouter des totaux et des pourcentages à des tableaux
+library(scales)       	# convertir facilement les proportions en pourcentages 
 
 # 1) Import
 df <- read_excel("malaria_epic.xlsx", sheet = "Feuil2")
