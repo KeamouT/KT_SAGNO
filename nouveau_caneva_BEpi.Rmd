@@ -1,0 +1,1942 @@
+---
+title: "Bulletin épidémiologique hebdomadaire - Mission MSF/Burundi (usage interne))"
+author: "Kéamou T. SAGNO | Epidemiology Activity Manager"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+  word_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+options(scipen = 999)
+```
+
+
+
+```{r packages, include=FALSE }
+rm(list = ls(all.names = TRUE))
+
+# Limiter les bibliothèques numériques à un seul thread
+Sys.setenv(
+  OPENBLAS_NUM_THREADS = "1",
+  OMP_NUM_THREADS = "1",
+  MKL_NUM_THREADS = "1",
+  BLIS_NUM_THREADS = "1",
+  VECLIB_MAXIMUM_THREADS = "1",
+  NUMEXPR_NUM_THREADS = "1"
+)
+
+packages <- c(
+  "readxl", "tidyverse", "tidyr", "stringr", "lubridate", "ggplot2",
+  "scales", "janitor", "openxlsx", "here", "rio", "gt", "flextable"
+ 
+)
+
+packages_optionnels <- c(
+   "sf", "terra", "tmap", "mapsf", "spdep"
+  )
+
+installer_si_absent <- function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}
+
+invisible(lapply(packages, installer_si_absent))
+
+
+```
+
+
+```{r, out.width='100%', fig.align='center', fig.cap='...', echo=FALSE}
+knitr::include_graphics('image/entete.png')
+```
+
+
+
+
+```{r fonctions-utiles, include=FALSE }
+extraire_annee_semaine <- function(data, colonne_periode = "periodname") {
+  data %>%
+    mutate(
+      period_txt = .data[[colonne_periode]],
+      semaine = suppressWarnings(as.integer(str_extract(period_txt, "(?<=Week\\s)\\d+|(?<=W)\\d+|\\b\\d{1,2}\\b"))),
+      date_fin = suppressWarnings(ymd(str_extract(period_txt, "\\d{4}-\\d{2}-\\d{2}$"))),
+      annee = suppressWarnings(year(date_fin)),
+      annee = if_else(is.na(annee), suppressWarnings(as.integer(str_extract(period_txt, "\\b20\\d{2}\\b"))), annee)
+    ) %>%
+    select(-period_txt)
+}
+
+convertir_numerique <- function(x) {
+  suppressWarnings(as.numeric(str_replace_all(as.character(x), "\\s", "")))
+}
+
+format_fr <- label_comma(big.mark = " ", decimal.mark = ",")
+```
+
+
+
+
+```{r paludisme-import-national, include=FALSE }
+    # Import de la base paludisme
+palu <- palu_raw <- read_excel("data_for_analysis/data_palu_burundi.xls",
+  skip = 1)
+
+    # Import de la base des MPE
+moh_dhis2 <- read_excel(path = "analyse_weekly-IDSR_dhis2.xls", skip = 1)
+
+names(palu) <- c("district_sanitaire", "periodname", "paludisme_teste_positif")
+
+palu <- palu %>%
+  mutate(
+    district_sanitaire = str_squish(as.character(district_sanitaire)),
+    periodname = str_squish(as.character(periodname)),
+    cas_palu = convertir_numerique(paludisme_teste_positif)
+  ) %>%
+  extraire_annee_semaine("periodname")
+
+aire_zone_projet<- read_excel("data_for_analysis/aires_zones_ds.xlsx")
+names(aire_zone_projet)<- c("ds", "ZONES", "aire_sanitaire")
+ndava<- read_excel("data_for_analysis/data_weekly-IDSR_dhis_ndava.xls",
+                      skip = 1)
+cibitoke<- read_excel("data_for_analysis/data_weekly-IDSR_dhis_cibitoke.xls",
+                      skip = 1)
+ruyigi<- read_excel("data_for_analysis/data_weekly-IDSR_dhis_ruyigi.xls",
+                      skip = 1)
+
+data_projects_msf<- bind_rows(ndava, cibitoke, ruyigi)
+names(palu)
+```
+
+# Dernière semaine rapportée et complétude des données
+
+```{r derniere-semaine-palu, include=FALSE }
+avd_semaine_2026 <- palu %>%
+  filter(annee == 2026, !is.na(cas_palu)) %>%
+  summarise(max_sem = max(semaine -1, na.rm = TRUE)) %>%
+  pull(max_sem)
+
+
+derniere_semaine_2026 <- palu %>%
+  filter(annee == 2026, !is.na(cas_palu)) %>%
+  summarise(max_sem = max(semaine, na.rm = TRUE)) %>%
+  pull(max_sem)
+
+if (!is.finite(derniere_semaine_2026)) {
+  stop("Aucune donnée paludisme disponible pour 2026 avec cas non manquants.")
+}
+
+```
+Les données de ce bulletin proviennent de la compilation centralisée des données issues des formations sanitaires (publique, privée et confessionnelle) des 56 District sanitaires (DS) à travers le pays. Cette compilation est faite par le Service de Surveillance épidémiologique de la Direction du Système National d’information Sanitaire (DSNIS) du Burundi et rapporté dans le DHIS2. La dernière semaine rapporté est la semaine épidmiologique `r derniere_semaine_2026`.
+
+
+
+``` {r Completude, include=FALSE }
+# CALCUL DE LA COMPLETUDE HEBDOMADAIRE PAR DISTRICT
+dsnis_weekly <- read_excel( path = "dsnis_weekly.xlsx", sheet = 1) %>%  clean_names()
+
+# 3. Sélectionner les colonnes nécessaires
+base_completude <- dsnis_weekly %>% select(districts,semaine,nb_rap_attendus,nb_rap_recus)
+
+# 4. Nettoyer et convertir les variables
+base_completude <- base_completude %>% mutate(districts = str_squish(as.character(districts)),
+    semaine = suppressWarnings(as.integer(semaine)),
+    nb_rap_attendus = suppressWarnings(as.numeric(nb_rap_attendus)),
+    nb_rap_recus = suppressWarnings(as.numeric(nb_rap_recus)) ) %>%
+  filter(!is.na(districts), districts != "", !is.na(semaine))
+
+# 5. Identifier automatiquement la dernière semaine rapportée
+derniere_semaine <- base_completude %>% filter( !is.na(nb_rap_attendus) | !is.na(nb_rap_recus)) %>%
+  summarise(derniere_semaine = max(semaine, na.rm = TRUE)) %>%
+  pull(derniere_semaine)
+
+# 6. Filtrer les données de la dernière semaine rapportée
+base_derniere_semaine <- base_completude %>%  filter(semaine == derniere_semaine)
+
+# 7. Calculer la complétude par district
+# Formule :
+# Complétude (%) = rapports reçus / rapports attendus × 100
+# Le regroupement protège le calcul s'il existe plusieurs
+# lignes pour un même district pendant la même semaine.
+completude_district <- base_derniere_semaine %>%
+  group_by(districts) %>%
+  summarise(semaine = first(semaine),
+    rapports_attendus = sum(nb_rap_attendus, na.rm = TRUE),
+    rapports_recus = sum(nb_rap_recus,  na.rm = TRUE),
+    .groups = "drop") %>%
+  mutate(completude_pct = if_else(rapports_attendus > 0,  rapports_recus / rapports_attendus * 100,
+      NA_real_),
+    # Attribuer un statut à chaque district
+    statut = case_when(
+      is.na(completude_pct) ~ "Non calculable",
+      completude_pct <= 80 ~ "Critique",
+      completude_pct < 95 ~ "À améliorer",
+      TRUE ~ "Satisfaisante")) %>%
+  # Arrondir la complétude à une décimale
+  mutate(completude_pct = round(completude_pct, 1)) %>%
+  # Classer du district le moins complet au plus complet
+  arrange(completude_pct)
+
+# 8. Calculer la complétude globale
+completude_globale <- completude_district %>%
+  summarise(semaine = derniere_semaine,
+    rapports_attendus = sum(rapports_attendus,  na.rm = TRUE),
+    rapports_recus = sum(rapports_recus, na.rm = TRUE),
+    completude_globale_pct = if_else(
+      rapports_attendus > 0,
+      rapports_recus / rapports_attendus * 100,
+      NA_real_)) %>%
+  mutate(completude_globale_pct = round(completude_globale_pct, 1))
+
+# Afficher le résultat global
+completude_globale
+
+# 9. Sélectionner les districts à complétude critique
+districts_critiques <- completude_district %>%
+  filter(!is.na(completude_pct), completude_pct <= 80) %>%
+  select(
+    District = districts,
+    Semaine = semaine,
+    `Rapports attendus` = rapports_attendus,
+    `Rapports reçus` = rapports_recus,
+    `Complétude (%)` = completude_pct,
+    Statut = statut) %>%
+  arrange(`Complétude (%)`)
+
+# Afficher le tableau
+districts_critiques
+
+```
+
+
+```{r text_completude, include=FALSE}
+cat(
+  "À la semaine",
+  completude_globale$semaine,
+  ",",
+  completude_globale$rapports_recus,
+  "rapports ont été reçus sur",
+  completude_globale$rapports_attendus,
+  "rapports attendus, soit une complétude globale de",
+  paste0(completude_globale$completude_globale_pct, "%."))
+
+```
+Au cours de la semaine  `r completude_globale$semaine` , `r completude_globale$rapports_recus` rapports ont été reçus sur `r completude_globale$rapports_attendus` rapports attendus, soit une complétude globale de `r paste0(completude_globale$completude_globale_pct)`%.
+
+
+
+```{r aggregation-palu-national, include=FALSE}
+palu_filtre <- palu %>%
+  filter(
+    annee %in% 2021:2026,
+    !is.na(semaine),
+    semaine >= 1,
+    semaine <= 53
+  ) %>%
+  filter(annee != 2026 | semaine <= derniere_semaine_2026)
+
+palu_week_year <- palu_filtre %>%
+  group_by(annee, semaine) %>%
+  summarise(cas = sum(cas_palu, na.rm = TRUE), .groups = "drop") %>%
+  arrange(annee, semaine)
+
+seuils <- palu_week_year %>%
+  filter(annee %in% 2021:2025) %>%
+  group_by(semaine) %>%
+  summarise(
+    seuil_alerte = median(cas, na.rm = TRUE),
+    seuil_epidemique = quantile(cas, probs = 0.75, na.rm = TRUE, type = 7),
+    .groups = "drop"
+  )
+
+graph_df <- palu_week_year %>%
+  filter(annee %in% c(2025, 2026), semaine <= derniere_semaine_2026) %>%
+  left_join(seuils, by = "semaine")
+
+d2025 <- graph_df %>% filter(annee == 2025)
+d2026 <- graph_df %>% filter(annee == 2026)
+dseuils <- seuils %>% filter(semaine <= derniere_semaine_2026)
+```
+# Situation du paludisme au niveau national
+
+**2.1. Suivi des seuils de surveillance et tendance hebdomadaire des cas en 2026 face à 2025**
+
+```{r table-transposee-palu, include=FALSE}
+table_annee_semaine <- palu_week_year %>%
+  filter(annee %in% 2021:2026, semaine <= derniere_semaine_2026) %>%
+  mutate(ligne = as.character(annee), semaine = paste0("S", semaine)) %>%
+  select(ligne, semaine, cas) %>%
+  pivot_wider(names_from = semaine, values_from = cas)
+
+table_seuils <- seuils %>%
+  filter(semaine <= derniere_semaine_2026) %>%
+  mutate(semaine = paste0("S", semaine)) %>%
+  pivot_longer(
+    cols = c(seuil_alerte, seuil_epidemique), names_to = "ligne", values_to = "cas") %>%
+  mutate(ligne = recode(
+    ligne, 
+    "seuil_alerte" = "Médiane_2021_2025", 
+    "seuil_epidemique" = "Q3_2021_2025")) %>%
+  pivot_wider(names_from = semaine, values_from = cas)
+
+tendance_2026_vs_2025 <- palu_week_year %>%
+  filter(annee %in% c(2025, 2026), semaine <= derniere_semaine_2026) %>%
+  select(annee, semaine, cas) %>%
+  pivot_wider(names_from = annee, values_from = cas, names_prefix = "cas_") %>%
+  mutate(tendance_pct = ifelse(is.na(cas_2025) | cas_2025 == 0, NA_real_, ((cas_2026 - cas_2025) / cas_2025) * 100))
+
+ligne_tendance <- tendance_2026_vs_2025 %>%
+  mutate(ligne = "Tendance_2026_vs_2025_pct", semaine = paste0("S", semaine), cas = round(tendance_pct, 1)) %>%
+  select(ligne, semaine, cas) %>%
+  pivot_wider(names_from = semaine, values_from = cas)
+
+
+table_transposee <- bind_rows(table_annee_semaine, table_seuils, ligne_tendance)
+
+
+tableau_seuil<- table_transposee %>%
+  select(
+    1, # première colonne
+tail(names(.), 5))  %>% # cinq dernières colonnes
+  mutate(ligne = case_when(
+    ligne == "2021" ~ "2021",
+    ligne == "2022" ~ "2022",
+    ligne == "2023" ~ "2023",
+    ligne == "2024" ~ "2024",
+    ligne == "2025" ~ "2025",
+    ligne == "2026" ~ "Année en cours",
+    ligne == "Médiane_2021_2025" ~ "Seuil d'alerte",
+    ligne == "Q3_2021_2025" ~ "Seuil épidemique",
+    ligne == "Tendance_2026_vs_2025_pct" ~ "Tendance 2026 vs 2025"))
+
+tendance1<- tableau_seuil[9, 2][[1]]
+tendance2<- tableau_seuil[9, 6][[1]]
+
+```
+
+Au cours des semaines épidémiologiques `r names(tableau_seuil[2])` et `r names(tableau_seuil[6])`, les valeurs observées en 2026 sont restées largement inférieures aux seuils d’alerte et épidémiques. Comparativement à la même période en 2025, une baisse importante de cas de palusdisme est observée, variant de `r tendance1`% à  `r tendance2`%, sans indication de situation épidémique sur la période analysée comme réprésentée dans le **tableau I** suivant.
+
+```{r tables-seuils, echo=FALSE}
+knitr::kable(tableau_seuil, caption = '**Tableau I: Cas hebdomadaires de paludisme des 5 dernières années et celle en cours au Burundi comparés aux seuils (alerte/Epidemique) et tendance 2026 vs 2025**')
+```
+
+**2.2. Courbe épidémique des cas en 2026 vs 2025 et seuils**
+
+La courbe épidemique ci-dessous montre cette évolution hebdomadaire de ces cas de paludisme testé positif au niveau national depuis la SE1 2026 en comparaison de ceux de 2025 de la même période associant les courbe des seuils d’alerte et épidémique.
+
+```{r graphique-palu-national, fig.width=12, fig.height=6.5, include=FALSE}
+p_palu <- ggplot() +
+  geom_col(data = d2025, 
+           aes(x = semaine, y = cas, fill = "2025"), 
+           color = "grey30", linewidth = 0.7, width = 0.85) +
+  geom_col(data = d2026, 
+           aes(x = semaine, y = cas, fill = "2026"), 
+           color = "midnightblue", alpha = 0.72, width = 0.60) +
+  geom_line(data = dseuils, 
+            aes(x = semaine, y = seuil_alerte, color = "Seuil d’alerte"), 
+            linewidth = 1.05) +
+  geom_line(data = dseuils, 
+            aes(x = semaine, y = seuil_epidemique, color = "Seuil épidémique"), 
+            linewidth = 1.05, linetype = "dashed") +
+  geom_point(data = dseuils, aes(x = semaine, y = seuil_alerte, color = "Seuil d’alerte"), size = 1.8) +
+  geom_point(data = dseuils, aes(x = semaine, y = seuil_epidemique, color = "Seuil épidémique"), size = 1.8) +
+  scale_x_continuous(breaks = seq(1, derniere_semaine_2026, by = 1)) +
+  scale_y_continuous(labels = format_fr, expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(name = NULL, breaks = c("2026", "2025"), values = c("2026" = "#2C7FB8", "2025" = "transparent"), labels = c("Cas de palu en 2026", "Cas de palu en 2025")) +
+  scale_color_manual(name = NULL, values = c("Seuil d’alerte" = "#08519C", "Seuil épidémique" = "#CB181D")) +
+  labs(
+    title = paste0("Cas positifs de paludisme au Burundi : 2026 vs 2025, semaines 1–", derniere_semaine_2026),
+    subtitle = "Seuil d’alerte = médiane 2021–2025 ; seuil épidémique = 3e quartile 2021–2025",
+    x = "Semaine épidémiologique",
+    y = "Nombre de cas positifs"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(legend.position = "bottom", legend.box = "vertical", plot.title = element_text(face = "bold"), axis.text.x = element_text(size = 7))
+
+
+
+```
+
+```{r, out.width='100%', fig.align='center', fig.cap='Graphique 1 : Évolution hebdomadaire des cas positifs de paludisme depuis la SE1 2026 comparés aux cas de 2025 au Burundi', echo=FALSE}
+p_palu
+```
+
+**2.3. Courbe de variation des tendances des cas en 2026 vs 2025**
+
+```{r graphique-tendance-palu, fig.width=12, fig.height=5.5, include=FALSE}
+p_tendance <- ggplot(tendance_2026_vs_2025, aes(x = semaine, y = tendance_pct)) +
+  geom_col(aes(fill = tendance_pct >= 0), width = 0.75) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_fill_manual(values = c("TRUE" = "#CB181D", "FALSE" = "#238B45"), labels = c("FALSE" = "Baisse vs 2025", "TRUE" = "Hausse vs 2025"), name = NULL) +
+  scale_x_continuous(breaks = seq(1, derniere_semaine_2026, by = 1)) +
+  scale_y_continuous(labels = function(x) paste0(x, " %")) +
+  labs(title = "Variation hebdomadaire des cas de paludisme : 2026 vs 2025", x = "Semaine épidémiologique", y = "Variation (%)") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+```
+
+La courbe épidemique ci-dessous montre la variation hebdomadaire de baisse des cas de positifs de paludisme de 2026 face à 2025 depuis la SE1 2026.
+```{r, out.width='100%', fig.align='center', fig.cap='**Graphique 2: Évolution hebdomadaire de la variation des tendance entre 2026 et 2025 des cas positifs de paludisme au Burundi**', echo=FALSE }
+p_tendance
+```
+**2.4. Surveillance des alertes par district sanitaire**
+
+```{r palu-districts, include=FALSE}
+palu_clean <- palu %>%
+  filter(!is.na(district_sanitaire), !is.na(semaine), !is.na(annee), annee %in% 2021:2026)
+
+av_dern_semaine_2026 <- max(derniere_semaine_2026 - 1, 1)
+
+palu_district_week <- palu_clean %>%
+  filter(semaine <= derniere_semaine_2026) %>%
+  group_by(district_sanitaire, annee, semaine) %>%
+  summarise(cas = sum(cas_palu, na.rm = TRUE), .groups = "drop")
+
+palu_district_wide <- palu_district_week %>%
+  mutate(annee = as.character(annee)) %>%
+  pivot_wider(id_cols = c(district_sanitaire, semaine), names_from = annee, values_from = cas, names_prefix = "cas_")
+
+for (col in paste0("cas_", 2021:2026)) {
+  if (!col %in% names(palu_district_wide)) palu_district_wide[[col]] <- NA_real_
+}
+
+palu_district_alert <- palu_district_wide %>%
+  rowwise() %>%
+  mutate(
+    mediane_2021_2025 = median(c_across(c(cas_2021, cas_2022, cas_2023, cas_2024, cas_2025)), na.rm = TRUE),
+    q3_2021_2025 = quantile(c_across(c(cas_2021, cas_2022, cas_2023, cas_2024, cas_2025)), probs = 0.75, na.rm = TRUE, type = 7),
+    variation_vs_mediane_pct = if_else(is.na(mediane_2021_2025) | mediane_2021_2025 == 0, NA_real_, ((cas_2026 - mediane_2021_2025) / mediane_2021_2025) * 100),
+    variation_vs_q3_pct = if_else(is.na(q3_2021_2025) | q3_2021_2025 == 0, NA_real_, ((cas_2026 - q3_2021_2025) / q3_2021_2025) * 100)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    statut_2026 = case_when(
+      is.na(cas_2026) ~ "Donnée 2026 manquante",
+      cas_2026 > q3_2021_2025 ~ "Épidémie",
+      cas_2026 > mediane_2021_2025 ~ "Alerte",
+      TRUE ~ "Normal"
+    )
+  )
+
+districts_alert_bef_last_week <- palu_district_alert %>%
+  filter(semaine == derniere_semaine_2026) %>%
+  arrange(factor(statut_2026, levels = c("Épidémie", "Alerte", "Normal", "Donnée 2026 manquante")), desc(cas_2026))
+
+resume_statut_bef_last_week <- districts_alert_bef_last_week %>%
+  count(statut_2026, name = "nombre_districts") %>%
+  arrange(desc(nombre_districts))
+
+top_districts_alert <- districts_alert_bef_last_week %>%
+  filter(statut_2026 %in% c("Épidémie", "Alerte")) %>%
+  arrange(desc(cas_2026)) %>%
+  select(district_sanitaire, semaine, cas_2026, mediane_2021_2025, q3_2021_2025, statut_2026, variation_vs_mediane_pct, variation_vs_q3_pct)
+
+statut_epi <- resume_statut_bef_last_week %>%
+  rename(
+    `Statut Epidémique` = statut_2026,
+    `Nombre de district` = nombre_districts
+  )
+
+```
+
+Au cours de la semaine `r derniere_semaine_2026`, la situation des Districts sanitaire en alerte ou en épdémie sur les 56 districts sanitaire que compte est décrite dans le tableau suivant :
+
+```{r, echo=FALSE}
+statut_epi
+
+```
+
+```{r graphique-districts-alert, fig.width=11, fig.height=7, include=FALSE}
+p_district_alert <- districts_alert_bef_last_week %>%
+  filter(statut_2026 %in% c("Épidémie", "Alerte")) %>%
+  mutate(district_sanitaire = reorder(district_sanitaire, cas_2026)) %>%
+  ggplot(aes(x = district_sanitaire, y = cas_2026, fill = statut_2026)) +
+  geom_col() +
+  geom_point(aes(y = mediane_2021_2025), color = "blue", size = 2) +
+  geom_point(aes(y = q3_2021_2025), color = "red", size = 2) +
+  coord_flip() +
+  scale_fill_manual(values = c("Alerte" = "#FDB863", "Épidémie" = "#D7191C")) +
+  scale_y_continuous(labels = format_fr) +
+  labs(title = paste0("Districts en alerte ou épidémie paludisme - S", derniere_semaine_2026, " 2026"), subtitle = "Barres = cas 2026 ; point bleu = médiane historique ; point rouge = Q3 historique", x = "District sanitaire", y = "Cas positifs paludisme", fill = "Statut") +
+  theme_classic(base_size = 11) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+
+```
+
+Les Districts sanitaire en alerte ou en épdémie à la semaine `r derniere_semaine_2026` sont représentés par le graphique ci-après:
+```{r, out.width='100%', fig.align='center', fig.cap='**Graphique 3: Districts sanitaires en Epidémie ou en alerte d’épidemie de paludisme au Burundi**', echo=FALSE}
+p_district_alert
+```
+
+```{r heatmap-districts, fig.width=12, fig.height=10, include=FALSE}
+p_heatmap_alert <- palu_district_alert %>%
+  mutate(statut_2026 = factor(statut_2026, levels = c("Normal", "Alerte", "Épidémie", "Donnée 2026 manquante"))) %>%
+  ggplot(aes(x = semaine, y = district_sanitaire, fill = statut_2026)) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  scale_fill_manual(values = c("Normal" = "#1A9850", "Alerte" = "#FEE08B", "Épidémie" = "#D73027", "Donnée 2026 manquante" = "grey80"), drop = FALSE) +
+  scale_x_continuous(breaks = seq(1, derniere_semaine_2026, by = 1)) +
+  labs(title = "Statut paludisme par district et semaine - 2026", subtitle = "Comparaison des cas 2026 à la médiane et au Q3 historiques propres à chaque district", x = "Semaine épidémiologique", y = "District sanitaire", fill = "Statut") +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(), legend.position = "bottom", axis.text.y = element_text(size = 7), plot.title = element_text(face = "bold"))
+
+```
+
+La situation évolutive des statuts d’alerte et épidémie de paludisme selon les Districts sanitaire est représentée par le graphique ci-après:
+```{r, out.width='100%', fig.align='center', fig.cap='**Graphique 4: statuts d’alerte et épidémie de paludisme selon les DS au Burundi depuis la SE1 2026**', echo=FALSE }
+p_heatmap_alert
+```
+
+# Situation de l’ensemble des maladies à potentielle épidémique
+
+
+```{r idsr-import, include=FALSE}
+names(moh_dhis2) <- c(
+  "districts", "semaine", "Cholera_CasTraites", "cholera_deces",
+  "diarrh_sang__traites", "diarrh_sang_deces", "FHV_Test_positif",
+  "FHV_Deces", "MPOX_CasSuspect", "PFA_Cas", "PFA_Deces", "palu_positifs",
+  "palu_deces", "rougeole_suspect", "rougeole_deces", "TNN_CasSuspect", "TNN_Deces"
+)
+
+idsr <- moh_dhis2 %>%
+  mutate(
+    semaine_originale = semaine,
+    num_semaine = as.integer(str_extract(semaine, "(?<=Week\\s)\\d+")),
+    date_debut = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}")),
+    date_fin = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}$")),
+    annee = year(date_fin)
+  ) %>%
+  relocate(districts, annee, num_semaine, date_debut, date_fin, semaine_originale)
+
+surveillance <- idsr %>%
+  select(districts, num_semaine, annee, palu_positifs, palu_deces, rougeole_suspect, rougeole_deces,
+         MPOX_CasSuspect, FHV_Test_positif, FHV_Deces, diarrh_sang__traites, diarrh_sang_deces,
+         Cholera_CasTraites, cholera_deces, PFA_Cas, PFA_Deces, TNN_CasSuspect, TNN_Deces) %>%
+  mutate(across(-c(districts, num_semaine, annee), convertir_numerique)) %>%
+  mutate(semaine = paste0(annee, "-W", sprintf("%02d", num_semaine))) %>%
+  select(-annee)
+```
+
+**2.1. Tableau synthétique des trois dernières semaines et cumul**
+
+```{r tableau-idsr, include=FALSE}
+MPE_SE <- surveillance %>%
+  arrange(semaine) %>%
+  group_by(semaine) %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+total_cas <- surveillance %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)))
+
+MPE_SE <- bind_rows(MPE_SE, total_cas) %>%
+  mutate(semaine = case_when(is.na(semaine) ~ "Total", TRUE ~ semaine))
+
+SE_3D <- bind_rows(
+  MPE_SE %>% filter(semaine != "Total") %>% arrange(semaine) %>% slice_tail(n = 3),
+  MPE_SE %>% filter(semaine == "Total")
+)
+
+tab1 <- SE_3D %>%
+  select(-num_semaine) %>%
+  pivot_longer(cols = -semaine, names_to = "name", values_to = "value")
+
+tab2 <- tab1 %>% pivot_wider(names_from = semaine, values_from = value)
+
+tab3 <- tab2 %>%
+  mutate(
+    name = tolower(name),
+    name = case_when(
+      name == "diarrh_sang__traites" ~ "diarrsang_traites",
+      name == "diarrh_sang_deces" ~ "diarrsang_deces",
+      TRUE ~ name
+    )
+  ) %>%
+  separate(name, into = c("Disease", "Type"), sep = "_", extra = "merge", fill = "right") %>%
+  mutate(Type = case_when(Type == "deces" ~ "Deces", TRUE ~ "Cas"))
+
+df_final <- tab3 %>%
+  pivot_longer(cols = -c(Disease, Type), names_to = "Week", values_to = "Value") %>%
+  pivot_wider(names_from = Type, values_from = Value, values_fill = 0) %>%
+  mutate(FR = if_else(Cas > 0, Deces / Cas * 100, 0)) %>%
+  pivot_longer(cols = c(Cas, Deces, FR), names_to = "metric", values_to = "val") %>%
+  unite(col = "week_metric", Week, metric, sep = "_") %>%
+  pivot_wider(names_from = week_metric, values_from = val) %>%
+  mutate(Disease = case_when(
+    Disease == "cholera" ~ "Choléra",
+    Disease == "diarrsang" ~ "Diarrhée sanglante",
+    Disease == "fhv" ~ "Fièvre hémorragique virale",
+    Disease == "mpox" ~ "Mpox",
+    Disease == "palu" ~ "Paludisme confirmé",
+    Disease == "pfa" ~ "PFA",
+    Disease == "rougeole" ~ "Rougeole",
+    Disease == "tnn" ~ "Tétanos néonatal",
+    TRUE ~ Disease
+  )) %>%
+  arrange(Disease)
+
+gt_tbl <- df_final %>% gt(rowname_col = "Disease") %>% fmt_number(columns = contains("FR"), decimals = 2)
+
+weeks <- df_final %>% select(-Disease) %>% names() %>% str_remove("_(Cas|Deces|FR)$") %>% unique()
+for (wk in weeks) {
+  cols_for_week <- df_final %>% select(starts_with(wk)) %>% names()
+  gt_tbl <- gt_tbl %>% tab_spanner(label = wk, columns = all_of(cols_for_week))
+}
+
+col_names <- df_final %>% select(-Disease) %>% names()
+new_labels <- ifelse(str_detect(col_names, "_Cas"), "Cas", ifelse(str_detect(col_names, "_Deces"), "Décès", ifelse(str_detect(col_names, "_FR"), "TM (%)", col_names)))
+names(new_labels) <- col_names
+
+gt_tbl <- gt_tbl %>%
+  cols_label(!!!new_labels) %>%
+  tab_header(title = "Surveillance épidémiologique des maladies sous surveillance - Burundi") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  tab_style(style = cell_fill(color = "thistle2"), locations = cells_body(rows = Disease == "Choléra"))
+```
+
+La situation des maladies à potentiel épidémique sous surveillance des trois dernières semaines est décrite dans le tableau récapitulatif ci-après :
+
+
+**Tableau IV : Situation au cours des 3 dernières semaines et cumule des maladies à potentiel épidémique notifiées par la DSNIS de la SE1 2à la  SE`r derniere_semaine_2026` 2026 au Burundi**
+```{r, echo=FALSE}
+gt_tbl
+```
+
+
+**2.2. Tendances entre les deux dernières semaines**
+
+```{r tendances-idsr, include=FALSE}
+semaines_disponibles <- MPE_SE %>% filter(semaine != "Total") %>% arrange(semaine) %>% pull(semaine) %>% unique()
+sem_prec <- semaines_disponibles[length(semaines_disponibles) - 1]
+sem_der <- semaines_disponibles[length(semaines_disponibles)]
+
+col_prec <- paste0(sem_prec, "_Cas")
+col_der <- paste0(sem_der, "_Cas")
+
+tendance <- df_final %>%
+  select(Disease, all_of(col_prec), all_of(col_der)) %>%
+  mutate(tendance = if_else(.data[[col_prec]] == 0, NA_real_, round(((.data[[col_der]] - .data[[col_prec]]) / .data[[col_prec]]) * 100, 0)))
+
+
+gt_bl_tendance <- tendance %>% gt(rowname_col = "Disease")
+semaine<- tendance %>% 
+  select(-Disease) %>% 
+  names() %>% 
+  str_remove("_(Cas)$") %>% 
+  unique()
+
+for (wk in weeks) {
+  
+  # Identifier les colonnes appartenant à la semaine courante.
+  colonne_for_week <- tendance %>%
+    select(starts_with(wk)) %>%
+    names()
+  
+  # Regrouper les colonnes sous le nom de la semaine.
+  gt_bl_tendance <- gt_bl_tendance %>%
+    tab_spanner(
+      label = wk,
+      columns = all_of(colonne_for_week)
+    )
+}
+
+
+colonne_names <- tendance %>%
+  select(-Disease) %>%
+  names()
+
+new_noms <- ifelse(
+  str_detect(colonne_names, "_Cas"),
+  "Cas rapportés",
+  ifelse(
+    str_detect(colonne_names, "tendance"),
+    "Tendance entre les 2 SE (%)",
+      colonne_names
+    )
+  )
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_noms) <- colonne_names
+
+gt_bl_tendance <- gt_bl_tendance %>%
+  
+  # Appliquer les libellés Cas, Décès et TM (%).
+  cols_label(
+    !!!new_noms
+  ) %>%
+  
+  # Ajouter le titre général.
+  tab_header(
+    title = "Tendance épidémiologique des maladies sous surveillance, entre les 2 dernières SE - Burundi"
+  ) %>%
+  
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+
+```
+
+
+```{r, echo=FALSE}
+gt_bl_tendance
+```
+
+**2.3. Top 5 des Districts sanitaires aux taux d’incidences élévés**
+
+Le 5 des Districts sanitaires où les taux des incidences du Paludisme, Choléra, Rougeole et Mpox à la SE`r derniere_semaine_2026` sont décrit dans les tableaux suivants
+
+```{r incidences, include=FALSE}
+pop <- read_excel("population_ds.xlsx")
+
+last_week_label <- max(surveillance$semaine, na.rm = TRUE)
+last_week <- surveillance %>% filter(semaine == last_week_label) %>% arrange(districts)
+
+last_week_pop <- last_week %>% left_join(pop, by = "districts")
+
+last_week_inc <- last_week_pop %>%
+  select(districts, pop_total, semaine, palu_positifs, rougeole_suspect, MPOX_CasSuspect, Cholera_CasTraites) %>%
+  mutate(
+    incidence_palu = (palu_positifs / pop_total) * 1e4,
+    incidence_rougeole = (rougeole_suspect / pop_total) * 1e4,
+    incidence_mpox = (MPOX_CasSuspect / pop_total) * 1e4,
+    incidence_cholera = (Cholera_CasTraites / pop_total) * 1e4
+  )
+
+incidence_palu <- last_week_inc %>% select(districts, pop_total, palu_positifs, incidence_palu) %>% mutate(across(starts_with("incidence_"), ~ round(.x, 2))) %>% arrange(desc(incidence_palu)) %>% slice_head(n = 5)
+incidence_rougeole <- last_week_inc %>% select(districts, pop_total, rougeole_suspect, incidence_rougeole) %>% mutate(across(starts_with("incidence_"), ~ round(.x, 2))) %>% arrange(desc(incidence_rougeole)) %>% slice_head(n = 5)
+incidence_mpox <- last_week_inc %>% select(districts, pop_total, MPOX_CasSuspect, incidence_mpox) %>% mutate(across(starts_with("incidence_"), ~ round(.x, 2))) %>% arrange(desc(incidence_mpox)) %>% slice_head(n = 5)
+incidence_cholera <- last_week_inc %>% select(districts, pop_total, Cholera_CasTraites, incidence_cholera) %>% mutate(across(starts_with("incidence_"), ~ round(.x, 2))) %>% arrange(desc(incidence_cholera)) %>% slice_head(n = 5)
+
+
+# ============================================================================
+# CRÉATION DU TABLEAU DES TOP 5 DES DS INCIDENT DU PALUDISME
+# ============================================================================
+gt_incidence_palu <- incidence_palu %>% gt()
+
+col_names_incidence_palu <- incidence_palu %>%
+  names()
+
+new_col_names_incidence_palu <- ifelse(
+  str_detect(col_names_incidence_palu, "districts"),
+  "Top 5 des DS incidents",
+  ifelse(
+    str_detect(col_names_incidence_palu, "_total"),
+    "Population total du DS",
+    ifelse(
+      str_detect(col_names_incidence_palu, "_positifs"),
+      "Cas confirmés rapportés",
+      ifelse(
+      str_detect(col_names_incidence_palu, "_palu"),
+      "Cas pour 10 000",
+      col_names_incidence_palu
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_incidence_palu) <- col_names_incidence_palu
+
+gt_incidence_palu <- gt_incidence_palu %>%
+  
+  # Appliquer les libellés Cas, Décès et TM (%).
+  cols_label(
+    !!!new_col_names_incidence_palu
+  ) %>%
+  
+  # Ajouter le titre général.
+  tab_header(
+    title = "Top 5 des Districts sanitaires incidents - Burundi"
+  ) %>%
+  
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# ============================================================================
+# CRÉATION DU TABLEAU DES TOP 5 DES DS INCIDENT DE LA ROUGEOLE
+# ============================================================================
+gt_incidence_rougeole <- incidence_rougeole %>% gt()
+
+col_names_incidence_rougeole <- incidence_rougeole %>%
+  names()
+
+new_col_names_incidence_rougeole <- ifelse(
+  str_detect(col_names_incidence_rougeole, "districts"),
+  "Top 5 des DS incidents",
+  ifelse(
+    str_detect(col_names_incidence_rougeole, "_total"),
+    "Population total du DS",
+    ifelse(
+      str_detect(col_names_incidence_rougeole, "_suspect"),
+      "Cas suspects rapportés",
+      ifelse(
+      str_detect(col_names_incidence_rougeole, "_rougeole"),
+      "Cas pour 10 000",
+      col_names_incidence_rougeole
+    )
+  )))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_incidence_rougeole) <- col_names_incidence_rougeole
+
+gt_incidence_rougeole <- gt_incidence_rougeole %>%
+  
+  # Appliquer les libellés Cas, Décès et TM (%).
+  cols_label(
+    !!!new_col_names_incidence_rougeole
+  ) %>%
+  
+  # Ajouter le titre général.
+  tab_header(
+    title = "Top 5 des Districts sanitaires incidents - Burundi"
+  ) %>%
+  
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+
+# ============================================================================
+# CRÉATION DU TABLEAU DES TOP 5 DES DS INCIDENT DU CHOLERA
+# ============================================================================
+gt_incidence_cholera <- incidence_cholera %>% gt()
+
+col_names_incidence_cholera <- incidence_cholera %>%
+  names()
+
+new_col_names_incidence_cholera <- ifelse(
+  str_detect(col_names_incidence_cholera, "districts"),
+  "Top 5 des DS incidents",
+  ifelse(
+    str_detect(col_names_incidence_cholera, "_total"),
+    "Population total du DS",
+    ifelse(
+      str_detect(col_names_incidence_cholera, "_CasTraites"),
+      "Cas confirmés rapportés",
+      ifelse(
+      str_detect(col_names_incidence_cholera, "_cholera"),
+      "Cas pour 10 000",
+      col_names_incidence_cholera
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_incidence_cholera) <- col_names_incidence_cholera
+
+gt_incidence_cholera <- gt_incidence_cholera %>%
+  
+  # Appliquer les libellés Cas, Décès et TM (%).
+  cols_label(
+    !!!new_col_names_incidence_cholera
+  ) %>%
+  
+  # Ajouter le titre général.
+  tab_header(
+    title = "Top 5 des Districts sanitaires incidents - Burundi"
+  ) %>%
+  
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# ============================================================================
+# CRÉATION DU TABLEAU DES TOP 5 DES DS INCIDENT DE MPOX
+# ============================================================================
+gt_incidence_mpox <- incidence_mpox %>% gt()
+
+col_names_incidence_mpox <- incidence_mpox %>%
+  names()
+
+new_col_names_incidence_mpox <- ifelse(
+  str_detect(col_names_incidence_mpox, "districts"),
+  "Top 5 des DS incidents",
+  ifelse(
+    str_detect(col_names_incidence_mpox, "_total"),
+    "Population total du DS",
+    ifelse(
+      str_detect(col_names_incidence_mpox, "_CasSuspect"),
+      "Cas confirmés rapportés",
+      ifelse(
+      str_detect(col_names_incidence_mpox, "_mpox"),
+      "Cas pour 10 000",
+      col_names_incidence_mpox
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_incidence_mpox) <- col_names_incidence_mpox
+
+gt_incidence_mpox <- gt_incidence_mpox %>%
+    cols_label(
+    !!!new_col_names_incidence_mpox
+  ) %>%
+    tab_header(
+    title = "Top 5 des Districts sanitaires incidents - Burundi"
+  ) %>%
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+```
+
+
+```{r fonction-graphique-maladie, include=FALSE}
+graphique_maladie <- function(data, variable, titre) {
+  data %>%
+    select(num_semaine, all_of(variable)) %>%
+    group_by(num_semaine) %>%
+    summarise(valeur = sum(.data[[variable]], na.rm = TRUE), .groups = "drop") %>%
+    mutate(week_num = as.integer(num_semaine), semaine = factor(num_semaine, levels = sort(unique(week_num)))) %>%
+    arrange(week_num) %>%
+    ggplot(aes(x = semaine, y = valeur)) +
+    geom_col(fill = "midnightblue", color = "black", linewidth = 0.4, width = 1) +
+    scale_y_continuous(labels = format_fr) +
+    labs(title = titre, x = "Semaine épidémiologique", y = "Nombre de cas") +
+    theme_classic(base_size = 13) +
+    theme(legend.position = "none", plot.title = element_text(face = "bold"), axis.text.x = element_text(size = 11))
+}
+
+graph_mpox <- graphique_maladie(idsr, "MPOX_CasSuspect", "Évolution des cas de Mpox, Burundi 2026")
+graph_cholera <- graphique_maladie(idsr, "Cholera_CasTraites", "Évolution des cas de Choléra, Burundi 2026")
+graph_rougeole <- graphique_maladie(idsr, "rougeole_suspect", "Évolution des cas de Rougeole, Burundi 2026")
+
+```
+
+
+
+```{r cartographie, eval=TRUE, include=FALSE}
+invisible(lapply(packages_optionnels, installer_si_absent))
+
+ds_bui <- sf::st_read("DISTRICTS/DS BDI 1.4.2026 Vf.shp")
+
+zone_ruyigi<- sf::st_read("zones_des_ds/ds_ruyigi/zones_ds_ruyigi.shp")
+zone_cbtk_ndava<- sf::st_read("zones_des_ds/ds_cibitoke/zones_ds_cbtk_ndava.shp")
+ 
+# Carte vierge Ruyigi
+
+tm_shape(zone_ruyigi) +               # Shapefiles des limites administratives
+   tm_polygons(col = "#F7F7F7")+    # afficher les polygones en gris clairs
+   tm_borders(col = "#000000",      # parametrer la couleur des bordures   et l'epaisseur des lignes
+              lwd = 2) +
+   tm_text("ZONES")            # le texte de la colonne à afficher pour chaque polygone
+
+
+last_week_inc_map <- last_week_inc %>%
+  separate(districts, into = c("prefix", "Districts"), sep = " ", extra = "merge") %>%
+  select(-prefix)
+
+incidence <- merge(ds_bui, as.data.frame(last_week_inc_map), by.x = "Districts", by.y = "Districts", all.x = TRUE)
+
+brks_incidP <- quantile(incidence$incidence_palu, probs = seq(0, 1, length.out = 6), na.rm = TRUE) %>% unique() %>% as.numeric()
+brks_incidR <- mapsf::mf_get_breaks(x = incidence$incidence_rougeole, nbreaks = 5, breaks = "quantile") %>% unique() %>% as.numeric()
+
+tmap::tmap_mode("plot")
+
+inci_palu <- tmap::tm_shape(incidence) +
+  tmap::tm_polygons(col = "incidence_palu", palette = "Reds", style = "fixed", breaks = brks_incidP, title = "Incidence Paludisme +", textNA = "") +
+  tmap::tm_borders(col = "grey40") +
+  tmap::tm_text(text = "Districts", size = 0.6, col = "black", shadow = TRUE, remove.overlap = TRUE) +
+  tmap::tm_compass(type = "arrow", position = c("left", "top"), size = 2) +
+  tmap::tm_scalebar(position = c("left", "bottom"), text.size = 0.7) +
+  tmap::tm_layout(legend.outside = TRUE, frame = FALSE, main.title = paste0("Taux d'incidence des positifs de paludisme par DS du Burundi à la ", last_week_label), main.title.size = 1)
+
+
+inci_rougeole <- tmap::tm_shape(incidence) +
+  tmap::tm_polygons(col = "incidence_rougeole", palette = "Reds", style = "fixed", breaks = brks_incidR, title = "Incidence Rougeole", textNA = "") +
+  tmap::tm_borders(col = "grey40") +
+  tmap::tm_text(text = "Districts", size = 0.6, col = "black", shadow = TRUE, remove.overlap = TRUE) +
+  tmap::tm_compass(type = "arrow", position = c("left", "top"), size = 2) +
+  tmap::tm_scalebar(position = c("left", "bottom"), text.size = 0.7) +
+  tmap::tm_layout(legend.outside = TRUE, frame = FALSE, main.title = paste0("Taux d'incidence des cas suspects de rougeole par DS du Burundi à la ", last_week_label), main.title.size = 1)
+
+
+inci_cholera <- tmap::tm_shape(incidence) +
+  tmap::tm_polygons(col = "incidence_cholera", palette = "Reds", style = "fixed", breaks = brks_incidR, title = "Incidence Cholera", textNA = "") +
+  tmap::tm_borders(col = "grey40") +
+  tmap::tm_text(text = "Districts", size = 0.6, col = "black", shadow = TRUE, remove.overlap = TRUE) +
+  tmap::tm_compass(type = "arrow", position = c("left", "top"), size = 2) +
+  tmap::tm_scalebar(position = c("left", "bottom"), text.size = 0.7) +
+  tmap::tm_layout(legend.outside = TRUE, frame = FALSE, main.title = paste0("Taux d'incidence des cas de cholera par DS du Burundi à la ", last_week_label), main.title.size = 1)
+
+```
+
+
+
+```{r , echo=FALSE}
+# Ajout d'une colonne montrant le sens de la tendance
+sens_tendance <- tendance %>%
+  mutate(sens = ifelse(
+    tendance > 0, "hausse",
+    ifelse(tendance < 0, "baisse", " "
+     )
+  ))
+
+# Incidence Paludisme et taux d'incidence des Top 3
+DS1_inci_palu <- incidence_palu[1, 1][[1]]    # DS le plus incident
+inci_palu1 <- incidence_palu[1, 4][[1]]    # L'incience le plus élévé 
+
+DS2_inci_palu <- incidence_palu[2, 1][[1]]    # Le 2e DS le plus incident
+inci_palu2 <- incidence_palu[2, 4][[1]]    # L'incience du 2e DS le plus élévé 
+
+DS3_inci_palu <- incidence_palu[3, 1][[1]]    # Le 3e DS le plus incident
+inci_palu3 <- incidence_palu[3, 4][[1]]    # L'incience du 3e DS le plus élévé 
+
+
+# Incidence Choléra et taux d'incidence des Top 3
+DS1_cas_cholera <- incidence_cholera[1, 3][[1]]    # DS le plus incident
+DS1_inci_cholera <- incidence_cholera[1, 1][[1]]    # DS le plus incident
+inci_cholera1 <- incidence_cholera[1, 4][[1]]    # L'incience le plus élévé 
+sens_cholera <- sens_tendance[1, 5][[1]]    #
+
+DS2_cas_cholera <- incidence_cholera[2, 3][[1]]    #
+DS2_inci_cholera <- incidence_cholera[2, 1][[1]]    # Le 2e DS le plus incident
+inci_cholera2 <- incidence_cholera[2, 4][[1]]    # L'incience du 2e DS le plus élévé 
+
+DS3_cas_cholera <- incidence_cholera[3, 3][[1]]    #
+DS3_inci_cholera <- incidence_cholera[3, 1][[1]]    # Le 3e DS le plus incident
+inci_cholera3 <- incidence_cholera[3, 4][[1]]    # L'incience du 3e DS le plus élévé 
+
+cas_cholera_semaine <- tendance[1, 3][[1]]
+cas_cholera_semaine_avant <- tendance[1, 2][[1]]
+
+# Incidence rougeole et taux d'incidence des Top 3
+cas_rougeole_semaine <- tendance[7, 3][[1]]
+cas_rougeole_semaine_avant <- tendance[7, 2][[1]]
+sens_rougeole <- sens_tendance[7, 5][[1]]    #
+
+DS1_cas_rougeole <- incidence_rougeole[1, 3][[1]]   #
+DS1_inci_rougeole <- incidence_rougeole[1, 1][[1]]    # DS le plus incident
+inci_rougeole1 <- incidence_rougeole[1, 4][[1]]    # L'incience le plus élévé 
+
+DS2_cas_rougeole <- incidence_rougeole[2, 3][[1]]    #
+DS2_inci_rougeole <- incidence_rougeole[2, 1][[1]]    # Le 2e DS le plus incident
+inci_rougeole2 <- incidence_rougeole[2, 4][[1]]    # L'incience du 2e DS le plus élévé 
+
+DS3_cas_rougeole <- incidence_rougeole[3, 3][[1]]    #
+DS3_inci_rougeole <- incidence_rougeole[3, 1][[1]]    # Le 3e DS le plus incident
+inci_rougeole3 <- incidence_rougeole[3, 4][[1]]    # L'incience du 3e DS le plus élévé 
+
+
+```
+
+L’incidence des cas de paludime au cours de la semaine `r derniere_semaine_2026` est plus marquée dans le `r DS1_inci_palu` avec `r inci_palu1` cas/10000, suivi de `r DS2_inci_palu`  (`r inci_palu2` cas/10000), et `r DS3_inci_palu`  (`r inci_palu3` cas/10000).
+
+**Tableau V : Taux d’incidence des cas de paludisme pour 10 000 à la semaine `r derniere_semaine_2026` : Top 5 des DS du Burundi**
+```{r incidence_palu, echo=FALSE}
+gt_incidence_palu
+
+```
+
+
+```{r, echo=FALSE}
+inci_palu
+
+```
+
+
+Au cours de la semaine `r derniere_semaine_2026`, `r cas_cholera_semaine` nouveaux cas de choléra ont été notifiés contre `r cas_cholera_semaine_avant` cas la semaine précédente, admis et traité dans toutes les CTC à travers le pays soit une `r sens_cholera` par rapport aux cas de la semaine précédente. 
+
+```{r graph_cholera, echo=FALSE}
+graph_cholera
+```
+**Graphique 5 : Incidence hebdomadaire des cas de choéra notifié depuis la S1 à la semaine `r derniere_semaine_2026` 2026 au Burundi**
+
+
+Ces cas proviennent essentiellement des `r DS1_inci_cholera` ( `r DS1_cas_cholera` cas soit `r inci_cholera1` cas/100000); `r DS2_inci_cholera` (`r DS2_cas_cholera` cas soit `r inci_cholera2` cas/100000) et `r DS3_inci_cholera` (`r DS3_cas_cholera` cas soit `r inci_cholera3` cas/100000).
+
+**Tableau V : Taux d’incidence des cas de choléra pour 10 000 à la semaine `r derniere_semaine_2026` : Top 5 des DS du Burundi**
+```{r incidence_cholera, echo=FALSE}
+gt_incidence_cholera
+```
+
+
+```{r, echo=FALSE}
+
+inci_cholera
+```
+
+
+
+Au cours de la semaine `r derniere_semaine_2026`, `r cas_rougeole_semaine` nouveaux cas suspects de rougeole ont été notifiés contre `r cas_rougeole_semaine_avant` cas la semaine précédente à travers le pays soit une `r sens_rougeole` par rapport aux cas de la semaine précédente. 
+
+
+```{r, echo=FALSE }
+graph_rougeole
+
+```
+**Graphique 6 : Incidence hebdomadaire des cas suspects de rougeole notifié depuis la S1 à la semaine `r derniere_semaine_2026` 2026 au Burundi**
+
+
+
+Ces cas proviennent essentiellement des `r DS1_inci_rougeole` ( `r DS1_cas_rougeole` cas soit `r inci_rougeole1` cas/100000); `r DS2_inci_rougeole` (`r DS2_cas_rougeole` cas soit `r inci_rougeole2` cas/100000) et `r DS3_inci_rougeole` (`r DS3_cas_rougeole` cas soit `r inci_rougeole3` cas/100000).
+
+
+
+**Tableau V : Taux d’incidence des cas de rougeole pour 10 000 à la semaine `r derniere_semaine_2026` : Top 5 des DS du Burundi**
+```{r incidence_rougeole, echo=FALSE}
+gt_incidence_rougeole
+```
+
+
+```{r, echo=FALSE}
+
+inci_rougeole
+```
+
+
+# Focus sur les districts de présence MSF
+
+```{r focus-msf, fig.width=10, fig.height=5, include=FALSE}
+
+# District sanitaire de Cibitoke
+names(cibitoke) <- c(
+  "aire_sanitaire", "semaine", "Cholera_CasTraites", "cholera_deces",
+  "diarrh_sang__traites", "diarrh_sang_deces", "FHV_Test_positif",
+  "FHV_Deces", "MPOX_CasSuspect", "PFA_Cas", "PFA_Deces", "palu_positifs",
+  "palu_deces", "rougeole_suspect", "rougeole_deces", "TNN_CasSuspect", "TNN_Deces"
+)
+
+idsr_cibitoke <- cibitoke %>%
+  mutate(
+    semaine_originale = semaine,
+    num_semaine = as.integer(str_extract(semaine, "(?<=Week\\s)\\d+")),
+    date_debut = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}")),
+    date_fin = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}$")),
+    annee = year(date_fin)
+  ) %>%
+  relocate(aire_sanitaire, annee, num_semaine, date_debut, date_fin, semaine_originale)
+
+surveillance_cbtk <- idsr_cibitoke %>%
+  select(aire_sanitaire, num_semaine, annee, palu_positifs, palu_deces, rougeole_suspect, rougeole_deces,
+         MPOX_CasSuspect, FHV_Test_positif, FHV_Deces, diarrh_sang__traites, diarrh_sang_deces,
+         Cholera_CasTraites, cholera_deces, PFA_Cas, PFA_Deces, TNN_CasSuspect, TNN_Deces) %>%
+  mutate(across(-c(aire_sanitaire, num_semaine, annee))) %>%
+  mutate(semaine = paste0(annee, "-W", sprintf("%02d", num_semaine))) %>%
+  select(-annee)
+
+
+MPE_SE_cbtk <- surveillance_cbtk %>%
+  arrange(semaine) %>%
+  group_by(semaine) %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+total_cas_cbtk <- surveillance_cbtk %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)))
+
+MPE_SE_cbtk <- bind_rows(MPE_SE_cbtk, total_cas_cbtk) %>%
+  mutate(semaine = case_when(is.na(semaine) ~ "Total", TRUE ~ semaine))
+
+SE_3D_cbtk <- bind_rows(
+  MPE_SE_cbtk %>% filter(semaine != "Total") %>% arrange(semaine) %>% slice_tail(n = 3),
+  MPE_SE_cbtk %>% filter(semaine == "Total")
+)
+
+tab1_cbtk <- SE_3D_cbtk %>%
+  select(-num_semaine) %>%
+  pivot_longer(cols = -semaine, names_to = "name", values_to = "value")
+
+tab2_cbtk <- tab1_cbtk %>% pivot_wider(names_from = semaine, values_from = value)
+
+tab3_cbtk <- tab2_cbtk %>%
+  mutate(
+    name = tolower(name),
+    name = case_when(
+      name == "diarrh_sang__traites" ~ "diarrsang_traites",
+      name == "diarrh_sang_deces" ~ "diarrsang_deces",
+      TRUE ~ name
+    )
+  ) %>%
+  separate(name, into = c("Disease", "Type"), sep = "_", extra = "merge", fill = "right") %>%
+  mutate(Type = case_when(Type == "deces" ~ "Deces", TRUE ~ "Cas"))
+
+df_final_cbtk <- tab3_cbtk %>%
+  pivot_longer(cols = -c(Disease, Type), names_to = "Week", values_to = "Value") %>%
+  pivot_wider(names_from = Type, values_from = Value, values_fill = 0) %>%
+  mutate(FR = if_else(Cas > 0, Deces / Cas * 100, 0)) %>%
+  pivot_longer(cols = c(Cas, Deces, FR), names_to = "metric", values_to = "val") %>%
+  unite(col = "week_metric", Week, metric, sep = "_") %>%
+  pivot_wider(names_from = week_metric, values_from = val) %>%
+  mutate(Disease = case_when(
+    Disease == "cholera" ~ "Choléra",
+    Disease == "diarrsang" ~ "Diarrhée sanglante",
+    Disease == "fhv" ~ "Fièvre hémorragique virale",
+    Disease == "mpox" ~ "Mpox",
+    Disease == "palu" ~ "Paludisme confirmé",
+    Disease == "pfa" ~ "PFA",
+    Disease == "rougeole" ~ "Rougeole",
+    Disease == "tnn" ~ "Tétanos néonatal",
+    TRUE ~ Disease
+  )) %>%
+  arrange(Disease)
+
+gt_tbl_cbtk <- df_final_cbtk %>% gt(rowname_col = "Disease") %>% fmt_number(columns = contains("FR"), decimals = 2)
+
+weeks_cbtk <- df_final_cbtk %>% select(-Disease) %>% names() %>% str_remove("_(Cas|Deces|FR)$") %>% unique()
+for (wk in weeks_cbtk) {
+  cols_for_week <- df_final_cbtk %>% select(starts_with(wk)) %>% names()
+  gt_tbl_cbtk <- gt_tbl_cbtk %>% tab_spanner(label = wk, columns = all_of(cols_for_week))
+}
+
+col_names_cbtk <- df_final_cbtk %>% select(-Disease) %>% names()
+new_labels_cbtk <- ifelse(str_detect(col_names_cbtk, "_Cas"), "Cas", ifelse(str_detect(col_names_cbtk, "_Deces"), "Décès", ifelse(str_detect(col_names_cbtk, "_FR"), "TM (%)", col_names_cbtk)))
+names(new_labels_cbtk) <- col_names_cbtk
+
+gt_tbl_cbtk <- gt_tbl_cbtk %>%
+  cols_label(!!!new_labels_cbtk) %>%
+  tab_header(title = "Surveillance épidémiologique des maladies sous surveillance - DS Cibitoke") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  tab_style(style = cell_fill(color = "thistle2"), locations = cells_body(rows = Disease == "Choléra"))
+
+# Nombre de cas par semaine au DS de Cibitoke
+cas_semaine_cbtk<- MPE_SE_cbtk %>% 
+  filter(semaine != "Total")%>%
+  mutate(semaine = sub(".*-W", "SE", semaine))
+
+# Représentation graphique
+palu_cbtk<- ggplot(cas_semaine_cbtk, aes(x = semaine, y = palu_positifs)) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(palu_positifs)),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas positifs"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+rougeol_cbtk<- ggplot(cas_semaine_cbtk, aes(x = semaine, y = rougeole_suspect )) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(rougeole_suspect )),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas suspects de rougeole"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+cholera_cbtk<- ggplot(cas_semaine_cbtk, aes(x = semaine, y = Cholera_CasTraites  )) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(Cholera_CasTraites  )),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas de choléra traité"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# District sanitaire de Ndava
+
+names(ndava) <- c(
+  "aire_sanitaire", "semaine", "Cholera_CasTraites", "cholera_deces",
+  "diarrh_sang__traites", "diarrh_sang_deces", "FHV_Test_positif",
+  "FHV_Deces", "MPOX_CasSuspect", "PFA_Cas", "PFA_Deces", "palu_positifs",
+  "palu_deces", "rougeole_suspect", "rougeole_deces", "TNN_CasSuspect", "TNN_Deces"
+)
+
+idsr_ndava <- ndava %>%
+  mutate(
+    semaine_originale = semaine,
+    num_semaine = as.integer(str_extract(semaine, "(?<=Week\\s)\\d+")),
+    date_debut = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}")),
+    date_fin = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}$")),
+    annee = year(date_fin)
+  ) %>%
+  relocate(aire_sanitaire, annee, num_semaine, date_debut, date_fin, semaine_originale)
+
+surveillance_ndava  <- idsr_ndava %>%
+  select(aire_sanitaire, num_semaine, annee, palu_positifs, palu_deces, rougeole_suspect, rougeole_deces,
+         MPOX_CasSuspect, FHV_Test_positif, FHV_Deces, diarrh_sang__traites, diarrh_sang_deces,
+         Cholera_CasTraites, cholera_deces, PFA_Cas, PFA_Deces, TNN_CasSuspect, TNN_Deces) %>%
+  mutate(across(-c(aire_sanitaire, num_semaine, annee))) %>%
+  mutate(semaine = paste0(annee, "-W", sprintf("%02d", num_semaine))) %>%
+  select(-annee)
+
+
+MPE_SE_ndava  <- surveillance_ndava  %>%
+  arrange(semaine) %>%
+  group_by(semaine) %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+total_cas_ndava  <- surveillance_ndava  %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)))
+
+MPE_SE_ndava  <- bind_rows(MPE_SE_ndava , total_cas_ndava ) %>%
+  mutate(semaine = case_when(is.na(semaine) ~ "Total", TRUE ~ semaine))
+
+SE_3D_ndava  <- bind_rows(
+  MPE_SE_ndava  %>% filter(semaine != "Total") %>% arrange(semaine) %>% slice_tail(n = 3),
+  MPE_SE_ndava  %>% filter(semaine == "Total")
+)
+
+tab1_ndava  <- SE_3D_ndava  %>%
+  select(-num_semaine) %>%
+  pivot_longer(cols = -semaine, names_to = "name", values_to = "value")
+
+tab2_ndava  <- tab1_ndava  %>% pivot_wider(names_from = semaine, values_from = value)
+
+tab3_ndava  <- tab2_ndava  %>%
+  mutate(
+    name = tolower(name),
+    name = case_when(
+      name == "diarrh_sang__traites" ~ "diarrsang_traites",
+      name == "diarrh_sang_deces" ~ "diarrsang_deces",
+      TRUE ~ name
+    )
+  ) %>%
+  separate(name, into = c("Disease", "Type"), sep = "_", extra = "merge", fill = "right") %>%
+  mutate(Type = case_when(Type == "deces" ~ "Deces", TRUE ~ "Cas"))
+
+df_final_ndava  <- tab3_ndava  %>%
+  pivot_longer(cols = -c(Disease, Type), names_to = "Week", values_to = "Value") %>%
+  pivot_wider(names_from = Type, values_from = Value, values_fill = 0) %>%
+  mutate(FR = if_else(Cas > 0, Deces / Cas * 100, 0)) %>%
+  pivot_longer(cols = c(Cas, Deces, FR), names_to = "metric", values_to = "val") %>%
+  unite(col = "week_metric", Week, metric, sep = "_") %>%
+  pivot_wider(names_from = week_metric, values_from = val) %>%
+  mutate(Disease = case_when(
+    Disease == "cholera" ~ "Choléra",
+    Disease == "diarrsang" ~ "Diarrhée sanglante",
+    Disease == "fhv" ~ "Fièvre hémorragique virale",
+    Disease == "mpox" ~ "Mpox",
+    Disease == "palu" ~ "Paludisme confirmé",
+    Disease == "pfa" ~ "PFA",
+    Disease == "rougeole" ~ "Rougeole",
+    Disease == "tnn" ~ "Tétanos néonatal",
+    TRUE ~ Disease
+  )) %>%
+  arrange(Disease)
+
+gt_tbl_ndava  <- df_final_ndava  %>% gt(rowname_col = "Disease") %>% fmt_number(columns = contains("FR"), decimals = 2)
+
+weeks_ndava  <- df_final_ndava  %>% select(-Disease) %>% names() %>% str_remove("_(Cas|Deces|FR)$") %>% unique()
+for (wk in weeks_ndava ) {
+  cols_for_week <- df_final_ndava  %>% select(starts_with(wk)) %>% names()
+  gt_tbl_ndava  <- gt_tbl_ndava  %>% tab_spanner(label = wk, columns = all_of(cols_for_week))
+}
+
+col_names_ndava  <- df_final_ndava  %>% select(-Disease) %>% names()
+new_labels_ndava  <- ifelse(str_detect(col_names_ndava , "_Cas"), "Cas", ifelse(str_detect(col_names_ndava , "_Deces"), "Décès", ifelse(str_detect(col_names_ndava , "_FR"), "TM (%)", col_names_ndava )))
+names(new_labels_ndava ) <- col_names_ndava 
+
+gt_tbl_ndava  <- gt_tbl_ndava  %>%
+  cols_label(!!!new_labels_ndava ) %>%
+  tab_header(title = "Surveillance épidémiologique des maladies sous surveillance - DS Ndava") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  tab_style(style = cell_fill(color = "thistle2"), locations = cells_body(rows = Disease == "Choléra"))
+
+# Nonbre de cas par semaine
+cas_semaine_ndava<- MPE_SE_ndava %>% 
+  filter(semaine != "Total") %>%
+  mutate(semaine = sub(".*-W", "SE", semaine))
+
+# Histogramme de representation
+palu_ndava<- ggplot(cas_semaine_ndava, aes(x = semaine, y = palu_positifs)) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(palu_positifs)),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas positifs"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+rougeol_ndava<- ggplot(cas_semaine_ndava, aes(x = semaine, y = rougeole_suspect )) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(rougeole_suspect )),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas suspects de rougeole"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+cholera_ndava<- ggplot(cas_semaine_ndava, aes(x = semaine, y = Cholera_CasTraites  )) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(Cholera_CasTraites  )),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas de choléra traité"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# District sanitaire de Ruyigi
+names(ruyigi) <- c(
+  "aire_sanitaire", "semaine", "Cholera_CasTraites", "cholera_deces",
+  "diarrh_sang__traites", "diarrh_sang_deces", "FHV_Test_positif",
+  "FHV_Deces", "MPOX_CasSuspect", "PFA_Cas", "PFA_Deces", "palu_positifs",
+  "palu_deces", "rougeole_suspect", "rougeole_deces", "TNN_CasSuspect", "TNN_Deces"
+)
+
+idsr_ruyigi <- ruyigi %>%
+  mutate(
+    semaine_originale = semaine,
+    num_semaine = as.integer(str_extract(semaine, "(?<=Week\\s)\\d+")),
+    date_debut = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}")),
+    date_fin = ymd(str_extract(semaine, "\\d{4}-\\d{2}-\\d{2}$")),
+    annee = year(date_fin)
+  ) %>%
+  relocate(aire_sanitaire, annee, num_semaine, date_debut, date_fin, semaine_originale)
+
+surveillance_ruyigi  <- idsr_ruyigi %>%
+  select(aire_sanitaire, num_semaine, annee, palu_positifs, palu_deces, rougeole_suspect, rougeole_deces,
+         MPOX_CasSuspect, FHV_Test_positif, FHV_Deces, diarrh_sang__traites, diarrh_sang_deces,
+         Cholera_CasTraites, cholera_deces, PFA_Cas, PFA_Deces, TNN_CasSuspect, TNN_Deces) %>%
+  mutate(across(-c(aire_sanitaire, num_semaine, annee))) %>%
+  mutate(semaine = paste0(annee, "-W", sprintf("%02d", num_semaine))) %>%
+  select(-annee)
+
+
+MPE_SE_ruyigi  <- surveillance_ruyigi  %>%
+  arrange(semaine) %>%
+  group_by(semaine) %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+total_cas_ruyigi  <- surveillance_ruyigi  %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)))
+
+MPE_SE_ruyigi  <- bind_rows(MPE_SE_ruyigi , total_cas_ruyigi ) %>%
+  mutate(semaine = case_when(is.na(semaine) ~ "Total", TRUE ~ semaine))
+
+SE_3D_ruyigi  <- bind_rows(
+  MPE_SE_ruyigi  %>% filter(semaine != "Total") %>% arrange(semaine) %>% slice_tail(n = 3),
+  MPE_SE_ruyigi  %>% filter(semaine == "Total")
+)
+
+tab1_ruyigi  <- SE_3D_ruyigi  %>%
+  select(-num_semaine) %>%
+  pivot_longer(cols = -semaine, names_to = "name", values_to = "value")
+
+tab2_ruyigi  <- tab1_ruyigi  %>% pivot_wider(names_from = semaine, values_from = value)
+
+tab3_ruyigi  <- tab2_ruyigi  %>%
+  mutate(
+    name = tolower(name),
+    name = case_when(
+      name == "diarrh_sang__traites" ~ "diarrsang_traites",
+      name == "diarrh_sang_deces" ~ "diarrsang_deces",
+      TRUE ~ name
+    )
+  ) %>%
+  separate(name, into = c("Disease", "Type"), sep = "_", extra = "merge", fill = "right") %>%
+  mutate(Type = case_when(Type == "deces" ~ "Deces", TRUE ~ "Cas"))
+
+df_final_ruyigi  <- tab3_ruyigi  %>%
+  pivot_longer(cols = -c(Disease, Type), names_to = "Week", values_to = "Value") %>%
+  pivot_wider(names_from = Type, values_from = Value, values_fill = 0) %>%
+  mutate(FR = if_else(Cas > 0, Deces / Cas * 100, 0)) %>%
+  pivot_longer(cols = c(Cas, Deces, FR), names_to = "metric", values_to = "val") %>%
+  unite(col = "week_metric", Week, metric, sep = "_") %>%
+  pivot_wider(names_from = week_metric, values_from = val) %>%
+  mutate(Disease = case_when(
+    Disease == "cholera" ~ "Choléra",
+    Disease == "diarrsang" ~ "Diarrhée sanglante",
+    Disease == "fhv" ~ "Fièvre hémorragique virale",
+    Disease == "mpox" ~ "Mpox",
+    Disease == "palu" ~ "Paludisme confirmé",
+    Disease == "pfa" ~ "PFA",
+    Disease == "rougeole" ~ "Rougeole",
+    Disease == "tnn" ~ "Tétanos néonatal",
+    TRUE ~ Disease
+  )) %>%
+  arrange(Disease)
+
+gt_tbl_ruyigi  <- df_final_ruyigi  %>% gt(rowname_col = "Disease") %>% fmt_number(columns = contains("FR"), decimals = 2)
+
+weeks_ruyigi  <- df_final_ruyigi  %>% select(-Disease) %>% names() %>% str_remove("_(Cas|Deces|FR)$") %>% unique()
+for (wk in weeks_ruyigi ) {
+  cols_for_week <- df_final_ruyigi  %>% select(starts_with(wk)) %>% names()
+  gt_tbl_ruyigi  <- gt_tbl_ruyigi  %>% tab_spanner(label = wk, columns = all_of(cols_for_week))
+}
+
+col_names_ruyigi  <- df_final_ruyigi  %>% select(-Disease) %>% names()
+new_labels_ruyigi  <- ifelse(str_detect(col_names_ruyigi , "_Cas"), "Cas", ifelse(str_detect(col_names_ruyigi , "_Deces"), "Décès", ifelse(str_detect(col_names_ruyigi , "_FR"), "TM (%)", col_names_ruyigi )))
+names(new_labels_ruyigi ) <- col_names_ruyigi 
+
+gt_tbl_ruyigi  <- gt_tbl_ruyigi  %>%
+  cols_label(!!!new_labels_ruyigi ) %>%
+  tab_header(title = "Surveillance épidémiologique des maladies sous surveillance - DS Ruyigi") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  tab_style(style = cell_fill(color = "thistle2"), locations = cells_body(rows = Disease == "Choléra"))
+
+# Cas par semaine au DS de Riyigi
+cas_semaine_ruyigi<- MPE_SE_ruyigi %>% 
+  filter(semaine != "Total") %>%
+  mutate(semaine = sub(".*-W", "SE", semaine))
+
+# Graph représentatif
+palu_ruyigi<- ggplot(cas_semaine_ruyigi, aes(x = semaine, y = palu_positifs)) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(palu_positifs)),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas positifs"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+rougeol_ruyigi<- ggplot(cas_semaine_ruyigi, aes(x = semaine, y = rougeole_suspect )) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(rougeole_suspect )),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas suspects de rougeole"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+cholera_ruyigi<- ggplot(cas_semaine_ruyigi, aes(x = semaine, y = Cholera_CasTraites  )) +
+  geom_col(fill = "#2C7FB8") +
+  geom_text(aes(label = scales::comma(Cholera_CasTraites  )),
+            vjust = -0.3, size = 3) +
+  labs(
+    x = "Semaine épidémiologique",
+    y = "Cas de choléra traité"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Calcul des Taux d'incidence par AR pour 1000 hbitants
+  # Projet Busuma
+pop_AR_project<- read_excel("data_for_analysis/pop_AR.xlsx")
+pop_AR_ruyigi <- pop_AR_project %>% filter(District_Sanitaire=="Ruyigi") %>% select(Aire_Responsabilite, Population) 
+names(pop_AR_ruyigi)<- c("aire_sanitaire", "Population")
+cas_DSE_ruyigi<- surveillance_ruyigi %>% filter(num_semaine == max(num_semaine))
+pop_AR_ruyigi_cas<- cas_DSE_ruyigi %>% left_join(pop_AR_ruyigi, by = "aire_sanitaire")
+
+
+last_week_inc_ruyigi <- pop_AR_ruyigi_cas %>%
+  select(aire_sanitaire, Population, semaine, palu_positifs, rougeole_suspect, Cholera_CasTraites) %>%
+  mutate(
+    inci_palu_ruyigi = (palu_positifs / Population) * 1e3,
+    inci_rougeole_ruyigi = (rougeole_suspect / Population) * 1e3,
+    inci_cholera_ruyigi = (Cholera_CasTraites / Population) * 1e3
+  )
+
+# Taux d'incidence du paludisme par AR pour 1000 hbitants
+inci_palu_ruyigi <- last_week_inc_ruyigi %>% select(aire_sanitaire, Population, palu_positifs, inci_palu_ruyigi) %>% mutate(across(starts_with("inci_"), ~ round(.x, 2))) %>% arrange(desc(inci_palu_ruyigi)) %>% slice_head(n = 3)
+
+# Taux d'incidence de la rougeole par AR pour 1000 hbitants
+inci_rougeole_ruyigi <- last_week_inc_ruyigi %>% select(aire_sanitaire, Population, rougeole_suspect, inci_rougeole_ruyigi) %>% mutate(across(starts_with("inci_"), ~ round(.x, 2))) %>% arrange(desc(inci_rougeole_ruyigi)) %>% slice_head(n = 3)
+
+
+  # Projet Cibitoke-Ndava
+cas_DSE_cbk<- surveillance_cbtk %>% filter(num_semaine == max(num_semaine))
+cas_DSE_ndava<- surveillance_ndava %>% filter(num_semaine == max(num_semaine))
+cas_DSE_cbk_ndava <- bind_rows(cas_DSE_cbk, cas_DSE_ndava)
+
+pop_AR_palu <- pop_AR_project %>% filter(District_Sanitaire=="Cibitoke" | District_Sanitaire=="Ndava") %>% select(Aire_Responsabilite, Population) 
+names(pop_AR_palu)<- c("aire_sanitaire", "Population")
+pop_AR_projetpalu_cas<- cas_DSE_cbk_ndava %>% left_join(pop_AR_palu, by = "aire_sanitaire")
+
+
+last_week_inc_pbi135 <- pop_AR_projetpalu_cas %>%
+  select(aire_sanitaire, Population, semaine, palu_positifs, rougeole_suspect, Cholera_CasTraites) %>%
+  mutate(
+    inci_palu_pbi135 = (palu_positifs / Population) * 1e3,
+    inci_rougeole_pbi135 = (rougeole_suspect / Population) * 1e3,
+    inci_cholera_pbi135 = (Cholera_CasTraites / Population) * 1e3
+  )
+
+# Taux d'incidence du paludisme par AR pour 1000 hbitants
+inci_palu_pbi135 <- last_week_inc_pbi135 %>% select(aire_sanitaire, Population, palu_positifs, inci_palu_pbi135) %>% mutate(across(starts_with("inci_"), ~ round(.x, 2))) %>% arrange(desc(inci_palu_pbi135)) %>% slice_head(n = 5)
+
+# Taux d'incidence de la rougeole par AR pour 1000 hbitants
+inci_rougeole_pbi135 <- last_week_inc_pbi135 %>% select(aire_sanitaire, Population, rougeole_suspect, inci_rougeole_pbi135) %>% mutate(across(starts_with("inci_"), ~ round(.x, 2))) %>% arrange(desc(inci_rougeole_pbi135)) %>% slice_head(n = 3)
+
+# Taux d'incidence du choléra par AR pour 1000 hbitants
+inci_cholera_pbi135 <- last_week_inc_pbi135 %>% select(aire_sanitaire, Population, Cholera_CasTraites, inci_cholera_pbi135) %>% mutate(across(starts_with("inci_"), ~ round(.x, 2))) %>% arrange(desc(inci_cholera_pbi135)) %>% slice_head(n = 3)
+
+# Transfornation en tableau gl : Paludisme à Ruyigi
+  inci_palu_ruyigi
+  
+gt_inci_palu_ruyigi <- inci_palu_ruyigi %>% gt()
+
+col_names_inci_palu_ruyigi <- inci_palu_ruyigi %>%
+  names()
+
+new_col_names_inci_palu_ruyigi <- ifelse(
+  str_detect(col_names_inci_palu_ruyigi, "aire_sanitaire"),
+  "Top 3 des AR incidentes",
+  ifelse(
+    str_detect(col_names_inci_palu_ruyigi, "Population"),
+    "Population total de l'AR",
+    ifelse(
+      str_detect(col_names_inci_palu_ruyigi, "_positifs"),
+      "Cas confirmés rapportés",
+      ifelse(
+      str_detect(col_names_inci_palu_ruyigi, "inci_palu_ruyigi"),
+      "Cas pour 1000",
+      col_names_inci_palu_ruyigi
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_inci_palu_ruyigi) <- col_names_inci_palu_ruyigi
+
+gt_inci_palu_ruyigi <- gt_inci_palu_ruyigi %>%
+    cols_label(
+    !!!new_col_names_inci_palu_ruyigi
+  ) %>%
+    tab_header(
+    title = "Top 3 des Aires de responsabilité incidentes - DS de Ruyigi"
+  ) %>%
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+
+# Transfornation en tableau gl : Rougeole à Ruyigi
+inci_rougeole_ruyigi
+
+gt_inci_rougeole_ruyigi <- inci_rougeole_ruyigi %>% gt()
+
+col_names_inci_rougeole_ruyigi <- inci_rougeole_ruyigi %>%
+  names()
+
+new_col_names_inci_rougeole_ruyigi <- ifelse(
+  str_detect(col_names_inci_rougeole_ruyigi, "aire_sanitaire"),
+  "Top 3 des AR incidentes",
+  ifelse(
+    str_detect(col_names_inci_rougeole_ruyigi, "Population"),
+    "Population total de l'AR",
+    ifelse(
+      str_detect(col_names_inci_rougeole_ruyigi, "_suspect"),
+      "Cas suspects rapportés",
+      ifelse(
+      str_detect(col_names_inci_rougeole_ruyigi, "inci_rougeole_ruyigi"),
+      "Cas pour 1000",
+      col_names_inci_rougeole_ruyigi
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_inci_rougeole_ruyigi) <- col_names_inci_rougeole_ruyigi
+
+gt_inci_rougeole_ruyigi <- gt_inci_rougeole_ruyigi %>%
+    cols_label(
+    !!!new_col_names_inci_rougeole_ruyigi
+  ) %>%
+    tab_header(
+    title = "Top 3 des Aires de responsabilité incidentes - DS de Ruyigi"
+  ) %>%
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# Transfornation en tableau gl : Paludisme au Projet BI135 de Cibitoke - Ndava
+inci_palu_pbi135
+gt_inci_palu_pbi135 <- inci_palu_pbi135 %>% gt()
+
+col_names_inci_palu_pbi135 <- inci_palu_pbi135 %>%
+  names()
+
+new_col_names_inci_palu_pbi135 <- ifelse(
+  str_detect(col_names_inci_palu_pbi135, "aire_sanitaire"),
+  "Top 6 des AR incidentes",
+  ifelse(
+    str_detect(col_names_inci_palu_pbi135, "Population"),
+    "Population total de l'AR",
+    ifelse(
+      str_detect(col_names_inci_palu_pbi135, "_positifs"),
+      "Cas confirmés rapportés",
+      ifelse(
+      str_detect(col_names_inci_palu_pbi135, "inci_palu_pbi135"),
+      "Cas pour 1000",
+      col_names_inci_palu_pbi135
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_inci_palu_pbi135) <- col_names_inci_palu_pbi135
+
+gt_inci_inci_palu_pbi135 <- gt_inci_palu_pbi135 %>%
+    cols_label(
+    !!!new_col_names_inci_palu_pbi135
+  ) %>%
+    tab_header(
+    title = "Top 6 des Aires de responsabilité incidentes - DS de Cibitoke - Ndava"
+  ) %>%
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# Transfornation en tableau gl : Rougeole au Projet BI135 de Cibitoke - Ndava
+inci_rougeole_pbi135
+
+gt_inci_rougeole_pbi135 <- inci_rougeole_pbi135 %>% gt()
+
+col_names_inci_rougeole_pbi135 <- inci_rougeole_pbi135 %>%
+  names()
+
+new_col_names_inci_rougeole_pbi135 <- ifelse(
+  str_detect(col_names_inci_rougeole_pbi135, "aire_sanitaire"),
+  "Top 6 des AR incidentes",
+  ifelse(
+    str_detect(col_names_inci_rougeole_pbi135, "Population"),
+    "Population total de l'AR",
+    ifelse(
+      str_detect(col_names_inci_rougeole_pbi135, "_suspect"),
+      "Cas suspect rapportés",
+      ifelse(
+      str_detect(col_names_inci_rougeole_pbi135, "inci_rougeole_pbi135"),
+      "Cas pour 1000",
+      col_names_inci_rougeole_pbi135
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_inci_rougeole_pbi135) <- col_names_inci_rougeole_pbi135
+
+gt_inci_rougeole_pbi135 <- gt_inci_rougeole_pbi135 %>%
+    cols_label(
+    !!!new_col_names_inci_rougeole_pbi135
+  ) %>%
+    tab_header(
+    title = "Top 6 des Aires de responsabilité incidentes - DS de Cibitoke - Ndava"
+  ) %>%
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# Transfornation en tableau gl : Cholera au Projet BI135 de Cibitoke - Ndava
+inci_cholera_pbi135
+
+gt_inci_cholera_pbi135<- inci_cholera_pbi135 %>% gt()
+
+col_names_inci_cholera_pbi135 <- inci_cholera_pbi135 %>%
+  names()
+
+new_col_names_inci_cholera_pbi135 <- ifelse(
+  str_detect(col_names_inci_cholera_pbi135, "aire_sanitaire"),
+  "Top 6 des AR incidentes",
+  ifelse(
+    str_detect(col_names_inci_cholera_pbi135, "Population"),
+    "Population total de l'AR",
+    ifelse(
+      str_detect(col_names_inci_cholera_pbi135, "_CasTraites"),
+      "Cas rapportés",
+      ifelse(
+      str_detect(col_names_inci_cholera_pbi135, "inci_cholera_pbi135"),
+      "Cas pour 1000",
+      col_names_inci_cholera_pbi135
+    )
+  )
+))
+
+# Associer chaque nouveau libellé à son nom de colonne original.
+names(new_col_names_inci_cholera_pbi135) <- col_names_inci_cholera_pbi135
+
+gt_inci_cholera_pbi135 <- gt_inci_cholera_pbi135 %>%
+    cols_label(
+    !!!new_col_names_inci_cholera_pbi135
+  ) %>%
+    tab_header(
+    title = "Top 6 des Aires de responsabilité incidentes - DS de Cibitoke - Ndava"
+  ) %>%
+  # Centrer le contenu.
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+
+```
+
+
+```{r Carto_projet_MSF, echo=FALSE}
+
+# Projet Paludisme : Cibitoke Ndava
+
+aire_cbtk_ndava<- aire_zone_projet %>% 
+  filter(ds== "Cibitoke" | ds== "Ndava")
+  
+  
+merge1 <- cas_DSE_cbk_ndava %>% left_join(aire_cbtk_ndava, by = "aire_sanitaire")
+
+cas_zones_cbtk <- merge1 %>%
+  select(palu_positifs, ZONES)  %>%
+  group_by(ZONES) %>%
+    summarise(cas = sum(palu_positifs, na.rm = T))
+
+names(cas_zones_cbtk)<- c("ZONES", "cas")
+# last_week_pop <- last_week %>% left_join(pop, by = "districts")
+  
+
+merge2<- cas_zones_cbtk %>% left_join(zone_cbtk_ndava, by = "ZONES")
+merge2 <- sf::st_as_sf(merge2)
+
+brks_incidPCN <- quantile(merge2$cas, probs = seq(0, 1, length.out = 6), na.rm = TRUE) %>% unique() %>% as.numeric()
+
+Carte_palu_cbtk_ndava <- tmap::tm_shape(merge2) +
+  tmap::tm_polygons(col = "cas", palette = "Reds", style = "fixed", breaks = brks_incidPCN, title = "Cas de Palu notifié +", textNA = "") +
+  tmap::tm_borders(col = "grey40") +
+  tmap::tm_text(text = "ZONES", size = 0.6, col = "black", shadow = TRUE, remove.overlap = TRUE) +
+  tmap::tm_compass(type = "arrow", position = c("left", "top"), size = 2) +
+  tmap::tm_scalebar(position = c("left", "bottom"), text.size = 0.7) +
+  tmap::tm_layout(legend.outside = TRUE, frame = FALSE, main.title = paste0("Cas positifs de paludisme par Zone adminstrative du DS de Cibitoke et Ndava"), 
+                  main.title.size = 1)
+
+
+# Projet Refugiés congolais Ruyigi
+aire_ruyigi<- aire_zone_projet %>% 
+  filter(ds== "Ruyigi")
+
+merge3 <- cas_DSE_ruyigi %>% left_join(aire_ruyigi, by = "aire_sanitaire")
+
+cas_zones_ruyigi <- merge3 %>%
+  select(palu_positifs, ZONES)  %>%
+  group_by(ZONES) %>%
+    summarise(cas = sum(palu_positifs, na.rm = T))
+
+# Fusion avec la base shapefile
+merge4<- cas_zones_ruyigi %>% left_join(zone_ruyigi, by = "ZONES")
+merge4 <- sf::st_as_sf(merge4)
+ # Carte des cas par zones admin
+   # classe en quintil
+brks_incidRuy <- quantile(merge4$cas, probs = seq(0, 1, length.out = 6), na.rm = TRUE) %>% unique() %>% as.numeric()
+
+Carte_palu_rugigi <- tmap::tm_shape(merge4) +
+  tmap::tm_polygons(col = "cas", palette = "Reds", style = "fixed", breaks = brks_incidRuy, title = "Cas de Palu notifié +", textNA = "") +
+  tmap::tm_borders(col = "grey40") +
+  tmap::tm_text(text = "ZONES", size = 0.6, col = "black", shadow = TRUE, remove.overlap = TRUE) +
+  tmap::tm_compass(type = "arrow", position = c("left", "top"), size = 2) +
+  tmap::tm_scalebar(position = c("left", "bottom"), text.size = 0.7) +
+  tmap::tm_layout(legend.outside = TRUE, frame = FALSE, main.title = paste0("Cas positifs de paludisme par Zone adminstrative du DS de Ruyigi"), 
+                  main.title.size = 1)
+
+
+```
+
+
+```{r tableau_SMIR_CIBITOKE, echo=FALSE}
+
+gt_tbl_cbtk
+
+```
+
+
+
+
+```{r graph_palu_cbitoke, echo=FALSE}
+palu_cbtk
+inci_palu_pbi135
+Carte_palu_cbtk_ndava
+
+```
+
+
+
+
+```{r graph_rougeol_cbitoke, echo=FALSE}
+rougeol_cbtk
+inci_rougeole_pbi135
+```
+
+
+
+```{r graph_cholera_cbitoke, echo=FALSE}
+
+cholera_cbtk
+gt_inci_cholera_pbi135
+```
+
+
+```{r tableau_SMIR_NDAVA, echo=FALSE}
+
+gt_tbl_ndava
+```
+
+
+
+```{r graph_palu_NDAVA, echo=FALSE}
+palu_ndava
+
+```
+
+
+
+```{r graph_rougeol_NDAVA, echo=FALSE}
+rougeol_ndava
+
+```
+
+
+```{r graph_cholera_NDAVA, echo=FALSE}
+
+cholera_ndava
+
+```
+
+
+```{r tableau_SMIR_RUYIGI, echo=FALSE}
+gt_tbl_ruyigi
+
+```
+
+
+
+```{r graph_palu_ruyigi, echo=FALSE}
+
+palu_ruyigi
+gt_inci_palu_ruyigi 
+Carte_palu_rugigi
+```
+
+
+
+```{r graph_rougeole_ruyigi, echo=FALSE}
+rougeol_ruyigi
+
+```
+
+
+
+```{r graph_cholera_ruyigi, echo=FALSE}
+
+cholera_ruyigi
+
+```
